@@ -1,0 +1,330 @@
+---
+title: "Immigration Maps"
+author: "Kevin Dyrland"
+output:
+  html_notebook:
+    code_folding: hide
+---
+
+# Maps are hard. Prepare to spend at least a day working on this.
+
+## Some thoughts. 
+
+- Do we need to talk about data manipulation?
+- We need to talk about where these maps are being used!
+- We need to talk about how your audience is going to view the Viz
+- Do we want to talk about rmarkdown??
+- Maps are hard. gg mapping framework is even harder -- And require an api key?
+  - We'll skip `ggmaps()`
+  - there are many map frameworks to talk about, we'll do `maps()` and `leaflet()`
+- Google early, google often!
+- I'm not great at universal design -- many things are implicit in this document that should be explict. ASK ME QUESTIONS and we can update the document together.
+
+```{r packages, message=FALSE}
+library(maps)
+library(tidyverse)
+library(conflicted)
+library(geosphere)
+library(scales)
+library(viridis)
+library(leaflet)
+library(rgdal)
+
+conflict_prefer("map", "maps")
+conflict_prefer("filter", "dplyr")
+```
+
+## Connection Map
+
+Let's walk through how to connect points on a world map.
+
+Source: https://www.r-graph-gallery.com/how-to-draw-connecting-routes-on-map-with-r-and-great-circles.html
+
+First we can make some cities:
+
+```{r map_and_cities}
+#make some cities (rough long/lat)
+Buenos_aires <- c(-58,-34)
+Paris <- c(2,49)
+Melbourne <- c(145,-38)
+
+# Data frame
+data <- rbind(Buenos_aires, Paris, Melbourne) %>% 
+  as.data.frame()
+colnames(data) <- c("long","lat")
+
+# Show the cities on the map
+map('world',
+    col="#f2f2f2", fill=TRUE, bg="white", lwd=0.05,
+    mar=rep(0,4),border=0, ylim=c(-80,80) 
+)
+points(x=data$long, y=data$lat, col="slateblue", cex=3, pch=20)
+# what happened here?
+# we made a dataframe of three cities
+# then we used the map() function from the maps package to plot the world
+# finally, we added points to the map based on our dataframe
+# aside - normally, you can run the plot() function and then the point function separately,
+# but for this package they have to be run at the same time. Strange and annoying.
+```
+Then we'll practice drawing a connecting line...
+```{r connection-bad}
+
+# Compute the connection between Melbourne and Buenos Aires 
+inter <- gcIntermediate(Buenos_aires, Melbourne, n=50, addStartEnd=TRUE, breakAtDateLine=FALSE)
+#what happens if we don't break at the dateline?
+# Show this connection
+map('world',
+    col="#f2f2f2", fill=TRUE, bg="white", lwd=0.05,
+    mar=rep(0,4),border=0, ylim=c(-80,80) 
+)
+points(x=data$long, y=data$lat, col="slateblue", cex=3, pch=20)
+lines(inter, col="slateblue", lwd=2)
+# what went wrong here?
+```
+That looks bad! Let's do it a bit better.
+
+```{r connection-better}
+plot_my_connection=function( dep_lon, dep_lat, arr_lon, arr_lat, ...){
+    #good code has a description right here of a function!
+    #basically, we're breaking the matrix in half at the dateline
+    #and skipping the pair of points that cross  
+    #dep means departure, arr means arrival
+    inter <- gcIntermediate(c(dep_lon, dep_lat), c(arr_lon, arr_lat), n=50,
+                            addStartEnd=TRUE, breakAtDateLine=F)   
+    inter=data.frame(inter)
+    diff_of_lon=abs(dep_lon) + abs(arr_lon)
+    if(diff_of_lon > 180){
+        lines(subset(inter, lon>=0), ...)
+        lines(subset(inter, lon<0), ...)
+    }else{
+        lines(inter, ...)
+    }
+  
+}
+
+map('world',
+    col="#f2f2f2", fill=TRUE, bg="white", lwd=0.05,
+    mar=rep(0,4),border=0, ylim=c(-80,80)
+)
+plot_my_connection(Paris[1], Paris[2], Melbourne[1], Melbourne[2], col="slateblue", lwd=2)
+plot_my_connection(Buenos_aires[1], Buenos_aires[2], Melbourne[1], Melbourne[2], col="slateblue", lwd=2)
+plot_my_connection(Buenos_aires[1], Buenos_aires[2], Paris[1], Paris[2], col="slateblue", lwd=2)
+```
+Ok, but now let's do some good coding practice. What was annoying about `plot_my_connection()`? How can we improve it? And let's add some color to show the strength of the connection (e.g. the number of immigrants).
+```{r connection-best}
+
+
+#make some data
+#head(world.cities)
+#get 8 cities
+dat.city <- world.cities %>%
+  filter(name %in% c("Montreal", "Saint Petersburg", "Paris", "Abidjan", "Salvador",
+                     "Buenos Aires", "Nairobi", "Melbourne")
+  ) %>%
+  filter(country.etc %in% c("Canada", "Russia", "France", "Ivory Coast", "Brazil", 
+                            "Argentina", "Kenya", "Australia")
+  ) %>%
+  filter(!(name == "Paris" & country.etc == "Canada")) #if we don't do this...we get Paris Canada! etc.
+#nrow(dat.city)
+
+#I didn't include any in America, China, India. You should pick your own cities!
+
+#make the volume matrix
+set.seed(53511)
+dat.vol <- dat.city %>%
+  expand(sending = name, receiving = name) %>%
+  filter(sending != receiving) %>%
+  left_join(dat.city, by = c("sending" = "name")) %>%
+  left_join(dat.city, by = c("receiving" = "name"), suffix = c(".sending", ".receiving")
+  ) %>%
+  mutate(volume = sample(1:1000000, nrow(.)))
+#expand to get all combinations, drop redundant, then bring lat/long in twice
+#(once for sending, once for receiving), then make up volume
+
+
+vol_lines_thick <- function(data, ...) {
+  #condensing plot_my_connection
+  #changing line thickness based on relative volume
+  city1 <- data %>% select(long.sending,   lat.sending)
+  city2 <- data %>% select(long.receiving, lat.receiving)
+  inter <- gcIntermediate(city1, city2, n = 50,
+                          breakAtDateLine = FALSE, addStartEnd = FALSE) %>%
+           as.data.frame()
+  diff_of_lon = abs(city1[1]) + abs(city2[1])
+  if(diff_of_lon > 180){
+        lines(subset(inter, lon>=0), ...)
+        lines(subset(inter, lon<0), ...)
+    }else{
+        lines(inter, ...)
+    }
+  #holder thought to adjust line thickness
+  
+  
+}
+vol_lines_color <- "holder to make function later"
+
+map('world',
+    col="#f2f2f2", fill=TRUE, bg="white", lwd=0.05,
+    mar=rep(0,4),border=0, ylim=c(-80,80)
+)
+for(r in 1:nrow(dat.vol)) {
+  vol_lines_thick(dat.vol[r,])
+}
+points(x = dat.city$long, y = dat.city$lat, col="slateblue", cex=2, pch=20)
+text(dat.city$name, x=dat.city$long, y=dat.city$lat,  col="slateblue", cex=1, pos=4)
+
+```
+Change of plans! Why should I make two functions, one that controls thickness and one that controls color, when I should be able to do it in one? The more generic the function, the better off you are, generally.
+
+Aside - in `ggplot()` you can have colors scale based on your data, auto-magically. Here, we need to make our own colors and put them into the dataset. Source for how to do this: https://stackoverflow.com/questions/45663162/map-values-to-viridis-colours-in-r
+```{r connections}
+#why am I making two functions?
+#just manipulate the data to have the appropiate thickness/color
+
+#color would be simple in ggplot
+map_viridis <- function(vec, num) {
+
+  vector_expanded <-round(vec, 1) * 10 # expand to allow for decimal precision
+  vector_exp_range <- max(vector_expanded) - min(vector_expanded)
+
+  colour_vector <- viridis(vector_exp_range + 1) # get vector of colour values for all possible decimals between min and max value
+  value_to_colour <- colour_vector[num * 10 - min(vector_expanded) + 1] # retrieve colour value for number
+
+  return(value_to_colour)
+#https://stackoverflow.com/questions/45663162/map-values-to-viridis-colours-in-r
+}
+
+#note - found this while working on the next section - much easier
+mypalette2 <- colorNumeric( palette="viridis", domain=dat.vol$volume, na.color="transparent")
+
+
+dat.vol <- dat.vol %>%
+  mutate(thickness = rescale(volume, to = c(1, 5)),
+         v.color = map_viridis(dat.vol$volume, volume),
+         test.color = mypalette2(volume)
+  )
+
+map('world',
+    col="#f2f2f2", fill=TRUE, bg="white", lwd=0.05,
+    mar=rep(0,4),border=0, ylim=c(-80,80)
+)
+
+for(r in 1:nrow(dat.vol)) {
+  vol_lines_thick(dat.vol[r,], lwd = dat.vol$thickness[r], col = dat.vol$v.color[r])
+}
+#do we need to talk about loops?
+points(x = dat.city$long, y = dat.city$lat, col="slateblue", cex=2, pch=20)
+text(dat.city$name, x=dat.city$long, y=dat.city$lat,  col="slateblue", cex=1, pos=4)
+
+#couple of notes: we need to add a legend! Left to the reader
+#because we used fake data, we have St. Pete to Salvador & 
+#Salvador to St. Pete - the thicker line dominates. 
+# We could probably look into arrows if we wanted...arrows()?
+#if time, we should think about how to add arrows showing flow direction
+```
+
+## Choropleth 
+
+Use this type when you have a geographic area that you want to color in relation to an ordinal variable.
+
+Source: https://www.r-graph-gallery.com/183-choropleth-map-with-leaflet.html
+
+```{r choro-data}
+#commenting out this entire section so it doesn't run again...
+
+# Download the shapefile. (note that I store it in a folder called DATA. You have to change that if needed.)
+# download.file("http://thematicmapping.org/downloads/TM_WORLD_BORDERS_SIMPL-0.3.zip", destfile="C:\\Users\\kevin\\Downloads\\DATAworld_shape_file.zip")
+# You now have it in your current working directory, have a look!
+
+# Unzip this file. You can do it with R (as below), or clicking on the object you downloaded.
+#system("unzip C:\\Users\\kevin\\Downloads\\DATAworld_shape_file.zip")
+#  -- > You now have 4 files. One of these files is a .shp file! (TM_WORLD_BORDERS_SIMPL-0.3.shp)
+# I was not able to get this to work - I did it manually
+```
+
+Simple population Choropleth - not great!
+```{r choro-start}
+world_spdf <- readOGR( 
+  dsn= paste0("C:\\Users\\kevin\\Downloads\\DATAworld_shape_file") , 
+  layer="TM_WORLD_BORDERS_SIMPL-0.3",
+  verbose=FALSE
+)
+#this was also a pain
+
+# Clean the data object
+world_spdf@data <- world_spdf@data %>%
+  mutate(POP2005 = (as.numeric(POP2005) / 1000000) %>% round (2),
+         POP2005 = ifelse(POP2005 == 0, NA, POP2005)
+  ) 
+  
+         
+#world_spdf@data$POP2005[ which(world_spdf@data$POP2005 == 0)] = NA
+#world_spdf@data$POP2005 <- as.numeric(as.character(world_spdf@data$POP2005)) / 1000000 %>% round(2)
+#summary(world_spdf@data$POP2005)
+
+#clearly what they did failed somewhere...I think it was the which() command
+
+
+# Create a color palette for the map:
+mypalette <- colorNumeric( palette="viridis", domain=world_spdf@data$POP2005, na.color="transparent")
+# mypalette(c(45,43))
+# 
+# Basic choropleth with leaflet?
+leaflet(world_spdf) %>% 
+   addTiles()  %>% 
+   setView( lat=10, lng=0 , zoom=2) %>%
+   addPolygons( fillColor = ~mypalette(POP2005), stroke=FALSE )
+ 
+
+```
+
+The source says to make a histogram. Always a good idea!
+
+```{r histogram}
+world_spdf@data %>%
+  ggplot(aes(x = POP2005)) +
+  geom_histogram(bins = 20, color = "white")
+
+```
+Clearly, a continous distribution is going to be inadequate. Discrete (bins) to the rescue!
+
+```{r final-choropleth}
+mybins <- c(0, 10, 20, 50, 100, 500, Inf)
+mypalette3 <- colorBin(palette = "viridis", domain = world_spdf@data$POP2005,
+                       na.color = "transparent", bins = mybins)
+#making a better color function
+
+mytext <- paste0("County: ", world_spdf@data$NAME, "<br/>",
+                "Area: ", world_spdf@data$AREA, "<br/>",
+                "Population: ", world_spdf$POP2005, " Mil"
+          ) %>% #some basic html
+          lapply(htmltools::HTML) 
+        #allows us to use html...I think we could do this in base r but \n doesn't work
+
+leaflet(world_spdf) %>% 
+  addTiles()  %>% 
+  setView(lat=10, lng=0 , zoom=2) %>%
+  addPolygons( 
+    fillColor = ~mypalette3(POP2005), 
+    stroke=TRUE, 
+    fillOpacity = 0.9, 
+    color="white", 
+    weight=0.3,
+    label = mytext,
+    labelOptions = labelOptions( 
+      style = list("font-weight" = "normal", padding = "3px 8px"), 
+      textsize = "13px", 
+      direction = "auto"
+    )
+  ) %>%
+  addLegend( pal=mypalette3, values=~POP2005, opacity=0.9, title = "Population (Mil)", position = "bottomleft" )
+```
+
+## What have we learned?
+
+- Shapefiles are hard
+- Different maps play with different files better/worse
+- Prepare to sink some time into this - this whole presentation take me roughly 4 hours to make and proof and research
+- Hopefully, we ran into something unexpected and had to google it
+
+Thanks for your time!
